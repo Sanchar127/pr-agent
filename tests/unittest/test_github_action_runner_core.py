@@ -464,6 +464,45 @@ async def test_synchronize_event_triggers_push_commands(monkeypatch, tmp_path, r
         ("https://api.github.com/repos/org/repo/pulls/1", "/improve"),
     ]
 
+@pytest.mark.asyncio
+async def test_synchronize_returns_false_when_push_command_fails(
+    monkeypatch, tmp_path, restore_github_settings
+):
+    handled = []
+    _patch_synchronize_deps(monkeypatch, handled, ["/review", "/improve"])
+
+    class FakeAgent:
+        async def handle_request(self, url, body, notify=None):
+            handled.append((url, body))
+            return body != "/review"
+
+    monkeypatch.setattr(github_action_runner, "PRAgent", FakeAgent)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(_write_synchronize_event(tmp_path)))
+    monkeypatch.setenv("GITHUB_TOKEN", "token")
+
+    result = await github_action_runner.run_action()
+
+    assert result is False
+    assert handled == [
+        ("https://api.github.com/repos/org/repo/pulls/1", "/review"),
+        ("https://api.github.com/repos/org/repo/pulls/1", "/improve"),
+    ]
+
+def test_main_exits_nonzero_when_action_fails(monkeypatch):
+    async def fake_run_action_and_drain():
+        return False
+
+    monkeypatch.setattr(
+        github_action_runner,
+        "_run_action_and_drain",
+        fake_run_action_and_drain,
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        github_action_runner.main()
+
+    assert exc_info.value.code == 1
 
 @pytest.mark.asyncio
 async def test_synchronize_skips_when_push_trigger_disabled(monkeypatch, tmp_path, restore_github_settings):

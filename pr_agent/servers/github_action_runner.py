@@ -125,8 +125,13 @@ async def _run_review_commands(event_payload):
     get_settings().config.is_auto_command = True
     get_settings().pr_description.final_update_message = False
     get_logger().info(f"Running review commands: {review_commands}")
+    success = True
     for command in review_commands:
-        await PRAgent().handle_request(pr_url, command)
+        result = await PRAgent().handle_request(pr_url, command)
+        if result is False:
+            success = False
+
+    return success
 
 
 async def run_action():
@@ -262,9 +267,13 @@ async def run_action():
                 get_settings().config.is_auto_command = True
                 get_settings().pr_description.final_update_message = False
                 get_logger().info(f"Running push commands: {push_commands}")
+                success = True
                 for command in push_commands:
-                    await PRAgent().handle_request(pr_url, command)
-                return
+                    result = await PRAgent().handle_request(pr_url, command)
+                    if result is False:
+                        success = False
+
+                return success
         if action in pr_actions:
             pr_url = event_payload.get("pull_request", {}).get("url")
             if pr_url:
@@ -296,7 +305,7 @@ async def run_action():
 
     # Handle submitted pull request review event
     elif GITHUB_EVENT_NAME == "pull_request_review":
-        await _run_review_commands(event_payload)
+        return await _run_review_commands(event_payload)
 
     # Handle issue comment event
     elif GITHUB_EVENT_NAME == "issue_comment" or GITHUB_EVENT_NAME == "pull_request_review_comment":
@@ -346,13 +355,17 @@ async def run_action():
                     provider = get_git_provider()(pr_url=url)
                     if is_pr:
                         _inject_artifact_context()
-                        await PRAgent().handle_request(
+                        result = await PRAgent().handle_request(
                             url, body, notify=lambda: provider.add_eyes_reaction(
                                 comment_id, disable_eyes=disable_eyes
                             )
                         )
-                    else:
-                        await PRAgent().handle_request(url, body)
+                        if result is False:
+                            return False
+                else:
+                    result = await PRAgent().handle_request(url, body)
+                    if result is False:
+                        return False
 
     # Handle workflow_run event (triggered after another workflow completes, e.g. after a terraform plan)
     elif GITHUB_EVENT_NAME == "workflow_run":
@@ -463,5 +476,10 @@ async def _run_action_and_drain():
             )
 
 
+def main():
+    result = asyncio.run(_run_action_and_drain())
+    raise SystemExit(1 if result is False else 0)
+
+
 if __name__ == '__main__':
-    asyncio.run(_run_action_and_drain())
+    main()
