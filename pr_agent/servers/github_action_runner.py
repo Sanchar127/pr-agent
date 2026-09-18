@@ -1,7 +1,9 @@
 import asyncio
 import json
 import os
-from typing import Union
+from contextvars import ContextVar
+from dataclasses import dataclass
+from typing import Optional, Union
 
 import dynaconf
 
@@ -20,6 +22,14 @@ from pr_agent.servers.github_app import handle_line_comments, matches_review_sta
 from pr_agent.tools.pr_code_suggestions import PRCodeSuggestions
 from pr_agent.tools.pr_description import PRDescription
 from pr_agent.tools.pr_reviewer import PRReviewer
+
+
+@dataclass
+class _ActionStatus:
+    failed: bool = False
+
+
+_action_status: ContextVar[Optional[_ActionStatus]] = ContextVar("pr_agent_action_status", default=None)
 
 
 def is_true(value: Union[str, bool]) -> bool:
@@ -55,6 +65,14 @@ def get_list_setting_or_env(key, fallback=None):
     if isinstance(value, (list, tuple, set)):
         return list(value)
     return [value]
+
+
+async def _handle_request(url, body, notify=None):
+    result = await PRAgent().handle_request(url, body, notify=notify)
+    if result is False:
+        status = _action_status.get()
+        if status is not None:
+            status.failed = True
 
 
 async def _run_review_commands(event_payload):
@@ -125,13 +143,8 @@ async def _run_review_commands(event_payload):
     get_settings().config.is_auto_command = True
     get_settings().pr_description.final_update_message = False
     get_logger().info(f"Running review commands: {review_commands}")
-    success = True
     for command in review_commands:
-        result = await PRAgent().handle_request(pr_url, command)
-        if result is False:
-            success = False
-
-    return success
+        await _handle_request(pr_url, command)
 
 
 async def run_action():
@@ -267,13 +280,8 @@ async def run_action():
                 get_settings().config.is_auto_command = True
                 get_settings().pr_description.final_update_message = False
                 get_logger().info(f"Running push commands: {push_commands}")
-                success = True
                 for command in push_commands:
-                    result = await PRAgent().handle_request(pr_url, command)
-                    if result is False:
-                        success = False
-
-                return success
+                    await _handle_request(pr_url, command)
         if action in pr_actions:
             pr_url = event_payload.get("pull_request", {}).get("url")
             if pr_url:
@@ -355,17 +363,15 @@ async def run_action():
                     provider = get_git_provider()(pr_url=url)
                     if is_pr:
                         _inject_artifact_context()
-                        result = await PRAgent().handle_request(
-                            url, body, notify=lambda: provider.add_eyes_reaction(
+                        await _handle_request(
+                            url,
+                            body,
+                            notify=lambda: provider.add_eyes_reaction(
                                 comment_id, disable_eyes=disable_eyes
-                            )
+                            ),
                         )
-                        if result is False:
-                            return False
                 else:
-                    result = await PRAgent().handle_request(url, body)
-                    if result is False:
-                        return False
+                    await _handle_request(url, body)
 
     # Handle workflow_run event (triggered after another workflow completes, e.g. after a terraform plan)
     elif GITHUB_EVENT_NAME == "workflow_run":
@@ -467,18 +473,29 @@ async def _run_action_and_drain():
     Wrapping here rather than at the end of run_action() covers its many early
     returns too, and keeps run_action() itself free of teardown concerns.
     """
+    status = _ActionStatus()
+    token = _action_status.set(status)
+
     try:
-        return await run_action()
+        await run_action()
     finally:
-        if litellm_callbacks_registered():
-            await drain_litellm_callbacks(
-                get_settings().litellm.get("callback_timeout_seconds", DEFAULT_CALLBACK_TIMEOUT_SECONDS)
-            )
+        try:
+            if litellm_callbacks_registered():
+                await drain_litellm_callbacks(
+                    get_settings().litellm.get(
+                        "callback_timeout_seconds",
+                        DEFAULT_CALLBACK_TIMEOUT_SECONDS,
+                    )
+                )
+        finally:
+            _action_status.reset(token)
+
+    if status.failed:
+        raise SystemExit(1)
 
 
 def main():
-    result = asyncio.run(_run_action_and_drain())
-    raise SystemExit(1 if result is False else 0)
+    asyncio.run(_run_action_and_drain())
 
 
 if __name__ == '__main__':
