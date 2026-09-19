@@ -282,6 +282,7 @@ async def run_action():
                 get_logger().info(f"Running push commands: {push_commands}")
                 for command in push_commands:
                     await _handle_request(pr_url, command)
+                return
         if action in pr_actions:
             pr_url = event_payload.get("pull_request", {}).get("url")
             if pr_url:
@@ -370,8 +371,8 @@ async def run_action():
                                 comment_id, disable_eyes=disable_eyes
                             ),
                         )
-                else:
-                    await _handle_request(url, body)
+                    else:
+                        await _handle_request(url, body)
 
     # Handle workflow_run event (triggered after another workflow completes, e.g. after a terraform plan)
     elif GITHUB_EVENT_NAME == "workflow_run":
